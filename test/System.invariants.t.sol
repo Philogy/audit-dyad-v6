@@ -13,9 +13,12 @@ import {Handler} from "./Handler.sol";
 import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
 import {ERC20} from "@solmate/src/tokens/ERC20.sol";
 import {LibString} from "solady/src/utils/LibString.sol";
+import {AddressHelpers} from "./utils/AddressHelpers.sol";
 
 /// @author philogy <https://github.com/philogy>
 contract SystemInvariants is Test {
+    using AddressHelpers for address[];
+
     address internal owner;
     Licenser internal minterLicenser;
     Licenser internal vaultLicenser;
@@ -41,6 +44,8 @@ contract SystemInvariants is Test {
         minterLicenser.add(address(manager));
 
         vaults.push(_createVault(18, 8));
+        vaults.push(_createVault(21, 6));
+        vaults.push(_createVault(12, 10));
 
         for (uint256 i = 0; i < 10; i++) {
             dnft.mintInsiderNft(makeAddr(string.concat("holder_", LibString.toString(i))));
@@ -50,6 +55,11 @@ contract SystemInvariants is Test {
 
         selectors.push(Handler.deposit.selector);
         selectors.push(Handler.withdraw.selector);
+        selectors.push(Handler.addVault.selector);
+        selectors.push(Handler.removeVault.selector);
+        selectors.push(Handler.mintDyad.selector);
+        selectors.push(Handler.priceDrift.selector);
+        selectors.push(Handler.burnDyad.selector);
 
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
@@ -64,16 +74,44 @@ contract SystemInvariants is Test {
     }
 
     function invariant_vaultSolvency() public {
-        uint256 totalVaults = vaults.length;
-        uint256 totalDNfts = dnft.totalSupply();
-        for (uint256 i = 0; i < totalVaults; i++) {
+        for (uint256 i = 0; i < vaults.length; i++) {
             Vault vault = vaults[i];
             ERC20 asset = vault.asset();
             uint256 totalRecordedAssets = 0;
-            for (uint256 id = 0; id < totalDNfts; id++) {
+            for (uint256 id = 0; id < dnft.totalSupply(); id++) {
                 totalRecordedAssets += vault.id2asset(id);
             }
-            assertEq(vault.asset().balanceOf(address(vault)), totalRecordedAssets);
+            assertEq(asset.balanceOf(address(vault)), totalRecordedAssets);
+        }
+    }
+
+    function invariant_dyadMintedSupplyConsistent() public {
+        uint256 totalMinted;
+        for (uint256 id = 0; id < dnft.totalSupply(); id++) {
+            totalMinted += dyad.mintedDyad(address(manager), id);
+        }
+        assertEq(totalMinted, dyad.totalSupply());
+    }
+
+    function invariant_addedVaultListConsistency() public {
+        for (uint256 id = 0; id < dnft.totalSupply(); id++) {
+            address[] memory addedVaults = handler.getAddedVaults(id);
+            for (uint256 i = 0; i < addedVaults.length; i++) {
+                assertTrue(addedVaults.contains(manager.vaults(id, i)));
+            }
+            (bool success,) = address(manager).staticcall(abi.encodeCall(manager.vaults, (id, addedVaults.length)));
+            assertFalse(success);
+            assertLe(addedVaults.length, manager.MAX_VAULTS());
+        }
+    }
+
+    function invariant_systemCRHealthy() public {
+        assertGt(handler.systemCR(), 1.2e18);
+    }
+
+    function invariant_participantPositionsCollateralized() public {
+        for (uint256 id = 0; id < dnft.totalSupply(); id++) {
+            assertGe(handler.usdWorth(id, handler.getAddedVaults(id)), 0);
         }
     }
 
